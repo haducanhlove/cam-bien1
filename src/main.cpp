@@ -1,38 +1,48 @@
-#include <Arduino.h> // Bắt buộc phải có trên PlatformIO
+#include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
 #include "time.h"
 
-const char* ssid = "huststaff";
-const char* password = "1";
-
+// Cấu hình Wi-Fi & NTP
+const char* ssid = "dmi";
+const char* password = "20082008";
 const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = 0;      
-const int   daylightOffset_sec = 0; 
+const long  gmtOffset_sec = 0;      // Giờ UTC (GMT+0)
+const int   daylightOffset_sec = 0;
 
-const char* pi_host = "192.168.192.168.0.188 10.136.73.49"; 
+// Phần cứng
+DHT dht(4, DHT11);
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Đổi thành 0x3F nếu mạch của bạn dùng 0x3F
 
-void printUTCTime() {
+// Biến định danh bản tin Tuần 3
+uint32_t boot_id = 0;
+uint32_t seq = 0;
+
+String getUTCTimeString() {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo)) {
-    Serial.println("Loi: Chua lay duoc thoi gian tu NTP!");
-    return;
+    return "1970-01-01T00:00:00Z";
   }
-  Serial.printf("Gio UTC: %04d-%02d-%02d %02d:%02d:%02d\n",
-                timeinfo.tm_year + 1900,
-                timeinfo.tm_mon + 1,
-                timeinfo.tm_mday,
-                timeinfo.tm_hour,
-                timeinfo.tm_min,
-                timeinfo.tm_sec);
+  char buf[25];
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  return String(buf);
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  Wire.begin(21, 22);
+  dht.begin();
+  lcd.init();
+  lcd.backlight();
 
-  Serial.print("Dang ket noi Wi-Fi: ");
-  Serial.println(ssid);
-  
+  // Tạo boot_id ngẫu nhiên mỗi lần khởi động lại ESP32
+  randomSeed(esp_random());
+  boot_id = random(100000, 999999);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Ket noi Wi-Fi...");
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
@@ -40,31 +50,33 @@ void setup() {
     delay(500);
     Serial.print(".");
   }
+  Serial.println("\nWi-Fi Connected! IP: " + WiFi.localIP().toString());
 
-  Serial.println("\nDa ket noi Wi-Fi thanh cong!");
-  Serial.print("Dia chi IP cua ESP32: ");
-  Serial.println(WiFi.localIP());
-
+  // Đồng bộ thời gian NTP
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  Serial.println("Dang dong bo thoi gian NTP...");
+  lcd.clear();
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
-    long rssi = WiFi.RSSI();
-    Serial.print("Cuong do tin hieu (RSSI): ");
-    Serial.print(rssi);
-    Serial.println(" dBm");
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  long rssi = WiFi.RSSI();
+  String utcTime = getUTCTimeString();
+  seq++;
 
-    printUTCTime();
-
-    Serial.print("San sang gui du lieu toi Pi tai dia chi: ");
-    Serial.println(pi_host);
-    Serial.println("-----------------------------------");
+  // Hiển thị lên LCD
+  lcd.setCursor(0, 0);
+  if (isnan(h) || isnan(t)) {
+    lcd.print("Loi doc DHT11!  ");
   } else {
-    Serial.println("Mat ket noi Wi-Fi! Dang thu ket noi lai...");
-    WiFi.reconnect();
+    lcd.print("T:"); lcd.print(t, 1); lcd.print("C H:"); lcd.print(h, 0); lcd.print("%   ");
   }
+  lcd.setCursor(0, 1);
+  lcd.print("RSSI:"); lcd.print(rssi); lcd.print("dBm    ");
 
-  delay(5000);
+  // In gói tin chuẩn bị gửi MQTT ra Serial để kiểm tra
+  Serial.printf("{\"boot_id\":%u,\"seq\":%u,\"utc\":\"%s\",\"temp\":%.1f,\"hum\":%.1f,\"rssi\":%ld}\n",
+                boot_id, seq, utcTime.c_str(), t, h, rssi);
+
+  delay(1000); // Chu kỳ 1 giây theo yêu cầu Tuần 3
 }
